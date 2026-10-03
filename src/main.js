@@ -1,9 +1,11 @@
 import './styles.css'
 import { supabase } from './lib/supabase.js'
+import { WHATSAPP_NUMBER } from './config.js'
 
 const CART_KEY = 'forno-brasa-cart-v1'
 const MIN_LEAD_MINUTES = 30
-import { WHATSAPP_NUMBER } from './config.js'
+const MAX_CART_LINES = 20
+const MAX_QUANTITY_PER_ITEM = 20
 
 const state = {
   pizzas: [],
@@ -18,14 +20,28 @@ const app = document.querySelector('#app')
 function loadCart() {
   try {
     const parsed = JSON.parse(localStorage.getItem(CART_KEY) || '[]')
-    return Array.isArray(parsed) ? parsed : []
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .filter(item => item && typeof item.pizza_id === 'string')
+      .slice(0, MAX_CART_LINES)
+      .map(item => ({
+        pizza_id: item.pizza_id,
+        name: String(item.name || '').slice(0, 120),
+        price: Math.max(0, Number(item.price) || 0),
+        quantity: Math.min(MAX_QUANTITY_PER_ITEM, Math.max(1, Number(item.quantity) || 1)),
+        observations: String(item.observations || '').slice(0, 240)
+      }))
   } catch {
     return []
   }
 }
 
 function saveCart() {
-  localStorage.setItem(CART_KEY, JSON.stringify(state.cart))
+  try {
+    localStorage.setItem(CART_KEY, JSON.stringify(state.cart))
+  } catch {
+    toast('Não foi possível persistir o carrinho neste navegador.', 'error')
+  }
 }
 
 function money(value) {
@@ -58,8 +74,13 @@ function addToCart(pizzaId) {
   if (!pizza) return
 
   const existing = state.cart.find(item => item.pizza_id === pizzaId)
-  if (existing) existing.quantity += 1
-  else state.cart.push({ pizza_id: pizza.id, name: pizza.name, price: Number(pizza.price), quantity: 1, observations: '' })
+  if (existing) {
+    if (existing.quantity >= MAX_QUANTITY_PER_ITEM) return toast('Limite de quantidade atingido.', 'error')
+    existing.quantity += 1
+  } else {
+    if (state.cart.length >= MAX_CART_LINES) return toast('Seu carrinho atingiu o limite de itens.', 'error')
+    state.cart.push({ pizza_id: pizza.id, name: pizza.name, price: Number(pizza.price), quantity: 1, observations: '' })
+  }
 
   saveCart()
   render()
@@ -69,7 +90,7 @@ function addToCart(pizzaId) {
 function updateQuantity(pizzaId, delta) {
   const item = state.cart.find(entry => entry.pizza_id === pizzaId)
   if (!item) return
-  item.quantity += delta
+  item.quantity = Math.min(MAX_QUANTITY_PER_ITEM, item.quantity + delta)
   if (item.quantity <= 0) state.cart = state.cart.filter(entry => entry.pizza_id !== pizzaId)
   saveCart()
   render()
@@ -233,6 +254,11 @@ function bindEvents() {
   document.querySelector('#checkout')?.addEventListener('click', openOrderModal)
   document.querySelector('#cancel-cart')?.addEventListener('click', () => { clearCart(); closeCart(); render(); toast('Carrinho limpo.') })
   document.querySelector('#order-form')?.addEventListener('submit', submitOrder)
+  document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return
+    if (!document.querySelector('#order-modal')?.hidden) closeModal()
+    else closeCart()
+  })
 
   document.querySelectorAll('[data-qty]').forEach(button => button.addEventListener('click', () => updateQuantity(button.dataset.id, Number(button.dataset.qty))))
   document.querySelectorAll('[data-remove]').forEach(button => button.addEventListener('click', () => updateQuantity(button.dataset.remove, -999)))
@@ -325,6 +351,9 @@ async function submitOrder(event) {
     observations: item.observations
   }))
 
+  const whatsappWindow = window.open('about:blank', '_blank')
+  if (whatsappWindow) whatsappWindow.opener = null
+
   const payload = {
     customer_name: customerName,
     customer_phone: normalizePhone(customerPhone),
@@ -345,6 +374,7 @@ async function submitOrder(event) {
   const { error } = await supabase.from('orders').insert(payload)
 
   if (error) {
+    whatsappWindow?.close()
     state.submitting = false
     button.disabled = false
     button.querySelector('span').textContent = 'Enviar pedido pelo WhatsApp'
@@ -364,7 +394,8 @@ async function submitOrder(event) {
   state.submitting = false
   render()
   toast('Pedido salvo! Abrindo o WhatsApp…')
-  window.open(url, '_blank', 'noopener,noreferrer')
+  if (whatsappWindow && !whatsappWindow.closed) whatsappWindow.location.href = url
+  else window.location.assign(url)
 }
 
 async function fetchPizzas() {
